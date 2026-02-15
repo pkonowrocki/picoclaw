@@ -158,6 +158,15 @@ docker compose logs -f picoclaw-gateway
 docker compose --profile gateway down
 ```
 
+### Tracing (Jaeger)
+
+```bash
+# Start Jaeger alongside the gateway
+docker compose --profile gateway --profile tracing up -d
+
+# Jaeger UI: http://localhost:16686
+```
+
 ### Agent Mode (One-shot)
 
 ```bash
@@ -593,6 +602,49 @@ The subagent has access to tools (message, web_search, etc.) and can communicate
 - `PICOCLAW_HEARTBEAT_ENABLED=false` to disable
 - `PICOCLAW_HEARTBEAT_INTERVAL=60` to change interval
 
+### Tracing (Jaeger / OpenTelemetry)
+
+PicoClaw supports distributed tracing via OpenTelemetry with Jaeger as the backend. This gives visibility into LLM calls, tool executions, and message processing.
+
+**1. Start Jaeger**
+
+```bash
+docker compose --profile tracing up jaeger -d
+```
+
+The Jaeger UI will be available at [http://localhost:16686](http://localhost:16686).
+
+**2. Enable tracing** in `~/.picoclaw/config.json`:
+
+```json
+{
+  "tracing": {
+    "enabled": true,
+    "endpoint": "localhost:4317"
+  }
+}
+```
+
+**3. Run PicoClaw** normally — spans will appear in Jaeger under the `picoclaw-gateway` or `picoclaw-agent` service.
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `enabled` | `false` | Enable/disable tracing |
+| `endpoint` | `localhost:4317` | OTLP gRPC collector endpoint |
+
+**Environment variables:**
+- `PICOCLAW_TRACING_ENABLED=true` to enable
+- `PICOCLAW_TRACING_ENDPOINT=localhost:4317` to change endpoint
+
+**Instrumented spans:**
+
+| Span | Description |
+|------|-------------|
+| `agent.processMessage` | Full message processing (session, channel, chat_id) |
+| `agent.llm.call` | Each LLM API call (model, iteration, message count) |
+| `agent.tool.execute` | Each tool execution (tool name) |
+| `provider.chat` | HTTP provider chat call (model, message count) |
+
 ### Providers
 
 > [!NOTE]
@@ -702,6 +754,10 @@ picoclaw agent -m "Hello"
   "heartbeat": {
     "enabled": true,
     "interval": 30
+  },
+  "tracing": {
+    "enabled": false,
+    "endpoint": "localhost:4317"
   }
 }
 ```
