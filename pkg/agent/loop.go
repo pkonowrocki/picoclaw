@@ -385,7 +385,9 @@ func (al *AgentLoop) runAgentLoop(ctx context.Context, opts processOptions) (str
 	)
 
 	// 3. Run LLM iteration loop (no session saves until success)
-	historyOffset := 1 + len(history) // skip system prompt + existing history
+	// Offset points to the user message (last element BuildMessages added).
+	// We save from here onward after success (user + any tool-call messages).
+	historyOffset := len(messages) - 1
 	finalContent, messages, iteration, err := al.runLLMIteration(ctx, messages, opts)
 	if err != nil {
 		return "", err
