@@ -76,16 +76,17 @@ type AgentDefaults struct {
 }
 
 type ChannelsConfig struct {
-	WhatsApp WhatsAppConfig `json:"whatsapp"`
-	Telegram TelegramConfig `json:"telegram"`
-	Feishu   FeishuConfig   `json:"feishu"`
-	Discord  DiscordConfig  `json:"discord"`
-	MaixCam  MaixCamConfig  `json:"maixcam"`
-	QQ       QQConfig       `json:"qq"`
-	DingTalk DingTalkConfig `json:"dingtalk"`
-	Slack    SlackConfig    `json:"slack"`
-	LINE     LINEConfig     `json:"line"`
-	OneBot   OneBotConfig   `json:"onebot"`
+	WhatsApp  WhatsAppConfig  `json:"whatsapp"`
+	Telegram  TelegramConfig  `json:"telegram"`
+	Feishu    FeishuConfig    `json:"feishu"`
+	Discord   DiscordConfig   `json:"discord"`
+	MaixCam   MaixCamConfig   `json:"maixcam"`
+	QQ        QQConfig        `json:"qq"`
+	DingTalk  DingTalkConfig  `json:"dingtalk"`
+	Slack     SlackConfig     `json:"slack"`
+	LINE      LINEConfig      `json:"line"`
+	OneBot    OneBotConfig    `json:"onebot"`
+	Messenger MessengerConfig `json:"messenger"`
 }
 
 type WhatsAppConfig struct {
@@ -161,6 +162,16 @@ type OneBotConfig struct {
 	ReconnectInterval  int                 `json:"reconnect_interval" env:"PICOCLAW_CHANNELS_ONEBOT_RECONNECT_INTERVAL"`
 	GroupTriggerPrefix []string            `json:"group_trigger_prefix" env:"PICOCLAW_CHANNELS_ONEBOT_GROUP_TRIGGER_PREFIX"`
 	AllowFrom          FlexibleStringSlice `json:"allow_from" env:"PICOCLAW_CHANNELS_ONEBOT_ALLOW_FROM"`
+}
+
+type MessengerConfig struct {
+	Enabled         bool                `json:"enabled" env:"PICOCLAW_CHANNELS_MESSENGER_ENABLED"`
+	PageAccessToken string              `json:"page_access_token" env:"PICOCLAW_CHANNELS_MESSENGER_PAGE_ACCESS_TOKEN"`
+	VerifyToken     string              `json:"verify_token" env:"PICOCLAW_CHANNELS_MESSENGER_VERIFY_TOKEN"`
+	AppSecret       string              `json:"app_secret" env:"PICOCLAW_CHANNELS_MESSENGER_APP_SECRET"`
+	WebhookPort     int                 `json:"webhook_port" env:"PICOCLAW_CHANNELS_MESSENGER_WEBHOOK_PORT"`
+	WebhookPath     string              `json:"webhook_path" env:"PICOCLAW_CHANNELS_MESSENGER_WEBHOOK_PATH"`
+	AllowFrom       FlexibleStringSlice `json:"allow_from" env:"PICOCLAW_CHANNELS_MESSENGER_ALLOW_FROM"`
 }
 
 type HeartbeatConfig struct {
@@ -305,6 +316,15 @@ func DefaultConfig() *Config {
 				ReconnectInterval:  5,
 				GroupTriggerPrefix: []string{},
 				AllowFrom:          FlexibleStringSlice{},
+			},
+			Messenger: MessengerConfig{
+				Enabled:         false,
+				PageAccessToken: "",
+				VerifyToken:     "",
+				AppSecret:       "",
+				WebhookPort:     18791,
+				WebhookPath:     "/messenger/webhook",
+				AllowFrom:       FlexibleStringSlice{},
 			},
 		},
 		Providers: ProvidersConfig{
