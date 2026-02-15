@@ -29,6 +29,7 @@ import (
 	"github.com/sipeed/picoclaw/pkg/config"
 	"github.com/sipeed/picoclaw/pkg/cron"
 	"github.com/sipeed/picoclaw/pkg/devices"
+	"github.com/sipeed/picoclaw/pkg/gateway"
 	"github.com/sipeed/picoclaw/pkg/health"
 	"github.com/sipeed/picoclaw/pkg/heartbeat"
 	"github.com/sipeed/picoclaw/pkg/logger"
@@ -44,6 +45,10 @@ import (
 //go:generate cp -r ../../workspace .
 //go:embed workspace
 var embeddedFiles embed.FS
+
+//go:generate cp -r ../../api .
+//go:embed api/openapi.yaml
+var openapiSpec []byte
 
 var (
 	version   = "dev"
@@ -692,6 +697,30 @@ func gatewayCmd() {
 		}
 	}()
 	fmt.Printf("✓ Health endpoints available at http://%s:%d/health and /ready\n", cfg.Gateway.Host, cfg.Gateway.Port)
+
+	// Start REST API if enabled
+	if cfg.API.Enabled {
+		gateway.SetVersion(version)
+		gateway.SetOpenAPISpec(openapiSpec)
+		apiServer := gateway.NewAPIServer(agentLoop, cfg.API)
+		apiAddr := fmt.Sprintf("%s:%d", cfg.Gateway.Host, cfg.Gateway.Port)
+		httpServer := &http.Server{
+			Addr:    apiAddr,
+			Handler: apiServer.Handler(),
+		}
+		go func() {
+			fmt.Printf("✓ REST API listening on %s\n", apiAddr)
+			if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+				logger.ErrorCF("api", "REST API server error", map[string]interface{}{
+					"error": err.Error(),
+				})
+			}
+		}()
+		go func() {
+			<-ctx.Done()
+			httpServer.Shutdown(context.Background())
+		}()
+	}
 
 	go agentLoop.Run(ctx)
 
