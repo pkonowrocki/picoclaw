@@ -14,7 +14,7 @@
     <a href="https://x.com/SipeedIO"><img src="https://img.shields.io/badge/X_(Twitter)-SipeedIO-black?style=flat&logo=x&logoColor=white" alt="Twitter"></a>
   </p>
 
- **中文** | [日本語](README.ja.md) | [English](README.md)
+ **中文** | [日本語](README.ja.md) | [Português](README.pt-br.md) | [English](README.md)
 </div>
 
 ---
@@ -236,6 +236,9 @@ picoclaw onboard
         "api_key": "YOUR_BRAVE_API_KEY",
         "max_results": 5
       }
+    },
+    "cron": {
+      "exec_timeout_minutes": 5
     }
   }
 }
@@ -644,6 +647,9 @@ picoclaw agent -m "你好"
       "search": {
         "api_key": "BSA..."
       }
+    },
+    "cron": {
+      "exec_timeout_minutes": 5
     }
   },
   "heartbeat": {
