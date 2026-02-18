@@ -101,12 +101,24 @@ func (c *DiscordChannel) Send(ctx context.Context, msg bus.OutboundMessage) erro
 		return fmt.Errorf("channel ID is empty")
 	}
 
+	for _, mediaPath := range msg.Media {
+		file, err := os.Open(mediaPath)
+		if err != nil {
+			return fmt.Errorf("failed to open media file %s: %w", mediaPath, err)
+		}
+		_, err = c.session.ChannelFileSend(channelID, mediaPath, file)
+		file.Close()
+		if err != nil {
+			return fmt.Errorf("failed to send media file %s: %w", mediaPath, err)
+		}
+	}
+
 	runes := []rune(msg.Content)
 	if len(runes) == 0 {
 		return nil
 	}
 
-	chunks := splitMessage(msg.Content, 1500) // Discord has a limit of 2000 characters per message, leave 500 for natural split e.g. code blocks
+	chunks := splitMessage(msg.Content, 1500)
 
 	for _, chunk := range chunks {
 		if err := c.sendChunk(ctx, channelID, chunk); err != nil {
@@ -253,7 +265,19 @@ func (c *DiscordChannel) sendChunk(ctx context.Context, channelID, content strin
 
 	done := make(chan error, 1)
 	go func() {
-		_, err := c.session.ChannelMessageSend(channelID, content)
+		var err error
+		if strings.HasPrefix(content, "file://") {
+			filePath := strings.TrimPrefix(content, "file://")
+			file, fErr := os.Open(filePath)
+			if fErr != nil {
+				done <- fErr
+				return
+			}
+			defer file.Close()
+			_, err = c.session.ChannelFileSend(channelID, filePath, file)
+		} else {
+			_, err = c.session.ChannelMessageSend(channelID, content)
+		}
 		done <- err
 	}()
 
