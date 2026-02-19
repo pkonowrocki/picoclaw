@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/bwmarrin/discordgo"
@@ -100,12 +101,24 @@ func (c *DiscordChannel) Send(ctx context.Context, msg bus.OutboundMessage) erro
 		return fmt.Errorf("channel ID is empty")
 	}
 
+	for _, mediaPath := range msg.Media {
+		file, err := os.Open(mediaPath)
+		if err != nil {
+			return fmt.Errorf("failed to open media file %s: %w", mediaPath, err)
+		}
+		_, err = c.session.ChannelFileSend(channelID, mediaPath, file)
+		file.Close()
+		if err != nil {
+			return fmt.Errorf("failed to send media file %s: %w", mediaPath, err)
+		}
+	}
+
 	runes := []rune(msg.Content)
 	if len(runes) == 0 {
 		return nil
 	}
 
-	chunks := utils.SplitMessage(msg.Content, 2000) // Split messages into chunks, Discord length limit: 2000 chars
+	chunks := splitMessage(msg.Content, 1500)
 
 	for _, chunk := range chunks {
 		if err := c.sendChunk(ctx, channelID, chunk); err != nil {
@@ -116,6 +129,135 @@ func (c *DiscordChannel) Send(ctx context.Context, msg bus.OutboundMessage) erro
 	return nil
 }
 
+// splitMessage splits long messages into chunks, preserving code block integrity.
+// All length calculations use rune count (characters) since Discord's 2000-char
+// limit is character-based, not byte-based.
+func splitMessage(content string, limit int) []string {
+	var messages []string
+	runes := []rune(content)
+
+	for len(runes) > 0 {
+		if len(runes) <= limit {
+			messages = append(messages, string(runes))
+			break
+		}
+
+		msgEnd := limit
+
+		// Find natural split point within the limit
+		msgEnd = findLastRuneNewline(runes[:limit], 200)
+		if msgEnd <= 0 {
+			msgEnd = findLastRuneSpace(runes[:limit], 100)
+		}
+		if msgEnd <= 0 {
+			msgEnd = limit
+		}
+
+		// Check if this would end with an incomplete code block
+		unclosedRuneIdx := findLastUnclosedCodeBlockRune(runes[:msgEnd])
+
+		if unclosedRuneIdx >= 0 {
+			// Message would end with incomplete code block
+			// Try to extend to include the closing ``` (with some buffer)
+			extendedLimit := limit + 400
+			if len(runes) > extendedLimit {
+				closingRuneIdx := findNextClosingCodeBlockRune(runes, msgEnd)
+				if closingRuneIdx > 0 && closingRuneIdx <= extendedLimit {
+					msgEnd = closingRuneIdx
+				} else {
+					// Can't find closing, split before the code block
+					msgEnd = findLastRuneNewline(runes[:unclosedRuneIdx], 200)
+					if msgEnd <= 0 {
+						msgEnd = findLastRuneSpace(runes[:unclosedRuneIdx], 100)
+					}
+					if msgEnd <= 0 {
+						msgEnd = unclosedRuneIdx
+					}
+				}
+			} else {
+				// Remaining content fits within extended limit
+				msgEnd = len(runes)
+			}
+		}
+
+		if msgEnd <= 0 {
+			msgEnd = limit
+		}
+
+		messages = append(messages, string(runes[:msgEnd]))
+		remaining := strings.TrimSpace(string(runes[msgEnd:]))
+		runes = []rune(remaining)
+	}
+
+	return messages
+}
+
+// findLastUnclosedCodeBlockRune finds the last opening ``` that doesn't have a closing ```
+// using rune-based indexing. Returns the rune position or -1 if all code blocks are complete.
+func findLastUnclosedCodeBlockRune(runes []rune) int {
+	count := 0
+	lastOpenIdx := -1
+
+	for i := 0; i < len(runes); i++ {
+		if i+2 < len(runes) && runes[i] == '`' && runes[i+1] == '`' && runes[i+2] == '`' {
+			if count%2 == 0 {
+				lastOpenIdx = i
+			}
+			count++
+			i += 2
+		}
+	}
+
+	if count%2 == 1 {
+		return lastOpenIdx
+	}
+	return -1
+}
+
+// findNextClosingCodeBlockRune finds the next closing ``` starting from a rune position.
+// Returns the rune position after the closing ``` or -1 if not found.
+func findNextClosingCodeBlockRune(runes []rune, startIdx int) int {
+	for i := startIdx; i < len(runes); i++ {
+		if i+2 < len(runes) && runes[i] == '`' && runes[i+1] == '`' && runes[i+2] == '`' {
+			// Include any trailing newline after the closing ```
+			end := i + 3
+			if end < len(runes) && runes[end] == '\n' {
+				end++
+			}
+			return end
+		}
+	}
+	return -1
+}
+
+// findLastRuneNewline finds the last newline within the last N runes.
+func findLastRuneNewline(runes []rune, searchWindow int) int {
+	searchStart := len(runes) - searchWindow
+	if searchStart < 0 {
+		searchStart = 0
+	}
+	for i := len(runes) - 1; i >= searchStart; i-- {
+		if runes[i] == '\n' {
+			return i
+		}
+	}
+	return -1
+}
+
+// findLastRuneSpace finds the last space within the last N runes.
+func findLastRuneSpace(runes []rune, searchWindow int) int {
+	searchStart := len(runes) - searchWindow
+	if searchStart < 0 {
+		searchStart = 0
+	}
+	for i := len(runes) - 1; i >= searchStart; i-- {
+		if runes[i] == ' ' || runes[i] == '\t' {
+			return i
+		}
+	}
+	return -1
+}
+
 func (c *DiscordChannel) sendChunk(ctx context.Context, channelID, content string) error {
 	// 使用传入的 ctx 进行超时控制
 	sendCtx, cancel := context.WithTimeout(ctx, sendTimeout)
@@ -123,7 +265,19 @@ func (c *DiscordChannel) sendChunk(ctx context.Context, channelID, content strin
 
 	done := make(chan error, 1)
 	go func() {
-		_, err := c.session.ChannelMessageSend(channelID, content)
+		var err error
+		if strings.HasPrefix(content, "file://") {
+			filePath := strings.TrimPrefix(content, "file://")
+			file, fErr := os.Open(filePath)
+			if fErr != nil {
+				done <- fErr
+				return
+			}
+			defer file.Close()
+			_, err = c.session.ChannelFileSend(channelID, filePath, file)
+		} else {
+			_, err = c.session.ChannelMessageSend(channelID, content)
+		}
 		done <- err
 	}()
 
@@ -249,13 +403,6 @@ func (c *DiscordChannel) handleMessage(s *discordgo.Session, m *discordgo.Messag
 		"preview":     utils.Truncate(content, 50),
 	})
 
-	peerKind := "channel"
-	peerID := m.ChannelID
-	if m.GuildID == "" {
-		peerKind = "direct"
-		peerID = senderID
-	}
-
 	metadata := map[string]string{
 		"message_id":   m.ID,
 		"user_id":      senderID,
@@ -264,8 +411,6 @@ func (c *DiscordChannel) handleMessage(s *discordgo.Session, m *discordgo.Messag
 		"guild_id":     m.GuildID,
 		"channel_id":   m.ChannelID,
 		"is_dm":        fmt.Sprintf("%t", m.GuildID == ""),
-		"peer_kind":    peerKind,
-		"peer_id":      peerID,
 	}
 
 	c.HandleMessage(senderID, m.ChannelID, content, mediaPaths, metadata)

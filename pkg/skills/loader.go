@@ -9,8 +9,6 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
-
-	"github.com/sipeed/picoclaw/pkg/logger"
 )
 
 var namePattern = regexp.MustCompile(`^[a-zA-Z0-9]+(-[a-zA-Z0-9]+)*$`)
@@ -253,11 +251,6 @@ func (sl *SkillsLoader) BuildSkillsSummary() string {
 func (sl *SkillsLoader) getSkillMetadata(skillPath string) *SkillMetadata {
 	content, err := os.ReadFile(skillPath)
 	if err != nil {
-		logger.WarnCF("skills", "Failed to read skill metadata",
-			map[string]interface{}{
-				"skill_path": skillPath,
-				"error":      err.Error(),
-			})
 		return nil
 	}
 
@@ -290,15 +283,10 @@ func (sl *SkillsLoader) getSkillMetadata(skillPath string) *SkillMetadata {
 
 // parseSimpleYAML parses simple key: value YAML format
 // Example: name: github\n description: "..."
-// Normalizes line endings to handle \n (Unix), \r\n (Windows), and \r (classic Mac)
 func (sl *SkillsLoader) parseSimpleYAML(content string) map[string]string {
 	result := make(map[string]string)
 
-	// Normalize line endings: convert \r\n and \r to \n
-	normalized := strings.ReplaceAll(content, "\r\n", "\n")
-	normalized = strings.ReplaceAll(normalized, "\r", "\n")
-
-	for _, line := range strings.Split(normalized, "\n") {
+	for _, line := range strings.Split(content, "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" || strings.HasPrefix(line, "#") {
 			continue
@@ -318,10 +306,9 @@ func (sl *SkillsLoader) parseSimpleYAML(content string) map[string]string {
 }
 
 func (sl *SkillsLoader) extractFrontmatter(content string) string {
-	// Support \n (Unix), \r\n (Windows), and \r (classic Mac) line endings for frontmatter blocks
-	// (?s) enables DOTALL so . matches newlines;
-	// ^--- at start, then ... --- at start of line, honoring all three line ending types
-	re := regexp.MustCompile(`(?s)^---(?:\r\n|\n|\r)(.*?)(?:\r\n|\n|\r)---`)
+	// (?s) enables DOTALL mode so . matches newlines
+	// Match first ---, capture everything until next --- on its own line
+	re := regexp.MustCompile(`(?s)^---\n(.*)\n---`)
 	match := re.FindStringSubmatch(content)
 	if len(match) > 1 {
 		return match[1]
@@ -330,11 +317,7 @@ func (sl *SkillsLoader) extractFrontmatter(content string) string {
 }
 
 func (sl *SkillsLoader) stripFrontmatter(content string) string {
-	// Support \n (Unix), \r\n (Windows), and \r (classic Mac) line endings for frontmatter blocks
-	// (?s) enables DOTALL so . matches newlines;
-	// ^--- at start, then ... --- at start of line, honoring all three line ending types
-	// Match zero or more trailing line endings after closing --- (handles both with and without blank lines)
-	re := regexp.MustCompile(`(?s)^---(?:\r\n|\n|\r)(.*?)(?:\r\n|\n|\r)---(?:\r\n|\n|\r)*`)
+	re := regexp.MustCompile(`^---\n.*?\n---\n`)
 	return re.ReplaceAllString(content, "")
 }
 
