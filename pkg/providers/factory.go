@@ -22,6 +22,7 @@ const (
 	providerTypeClaudeCLI
 	providerTypeCodexCLI
 	providerTypeGitHubCopilot
+	providerTypeGemini
 )
 
 type providerSelection struct {
@@ -140,6 +141,7 @@ func resolveProviderSelection(cfg *config.Config) (providerSelection, error) {
 			}
 		case "gemini", "google":
 			if cfg.Providers.Gemini.APIKey != "" {
+				sel.providerType = providerTypeGemini
 				sel.apiKey = cfg.Providers.Gemini.APIKey
 				sel.apiBase = cfg.Providers.Gemini.APIBase
 				sel.proxy = cfg.Providers.Gemini.Proxy
@@ -268,6 +270,7 @@ func resolveProviderSelection(cfg *config.Config) (providerSelection, error) {
 				sel.apiBase = "https://api.openai.com/v1"
 			}
 		case (strings.Contains(lowerModel, "gemini") || strings.HasPrefix(model, "google/")) && cfg.Providers.Gemini.APIKey != "":
+			sel.providerType = providerTypeGemini
 			sel.apiKey = cfg.Providers.Gemini.APIKey
 			sel.apiBase = cfg.Providers.Gemini.APIBase
 			sel.proxy = cfg.Providers.Gemini.Proxy
@@ -354,6 +357,8 @@ func CreateProvider(cfg *config.Config) (LLMProvider, error) {
 		return NewCodexCliProvider(sel.workspace), nil
 	case providerTypeGitHubCopilot:
 		return NewGitHubCopilotProvider(sel.apiBase, sel.connectMode, sel.model)
+	case providerTypeGemini:
+		return NewGeminiProviderWithKeys([]string{sel.apiKey}, sel.apiBase, sel.proxy), nil
 	default:
 		return NewHTTPProvider(sel.apiKey, sel.apiBase, sel.proxy), nil
 	}

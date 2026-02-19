@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"strings"
 	"sync"
@@ -30,8 +31,9 @@ type GeminiProvider struct {
 
 var geminiFallbackModels = []string{
 	"gemini-2.5-pro",
-	"gemini-2.5-flash",
-	"gemini-2.5-flash-lite-preview-06-17",
+	"gemini-flash-latest",
+	"gemini-3-pro-preview",
+	"gemini-2.5-flash-lite",
 }
 
 func NewGeminiProvider(apiKey, apiBase, proxy string) *GeminiProvider {
@@ -57,7 +59,7 @@ func NewGeminiProviderWithKeys(keys []string, apiBase, proxy string) *GeminiProv
 }
 
 func (p *GeminiProvider) GetDefaultModel() string {
-	return "gemini-2.5-flash"
+	return "gemini-3-flash-preview"
 }
 
 func (p *GeminiProvider) Chat(ctx context.Context, messages []Message, tools []ToolDefinition, model string, options map[string]interface{}) (*LLMResponse, error) {
@@ -295,11 +297,19 @@ func (p *GeminiProvider) assistantParts(msg Message) []*genai.Part {
 			_ = json.Unmarshal([]byte(tc.Function.Arguments), &args)
 		}
 
+		var thoughtSig []byte
+		if tc.ExtraContent != nil {
+			if sig, ok := tc.ExtraContent["thought_signature"].(string); ok && sig != "" {
+				thoughtSig = []byte(sig)
+			}
+		}
+
 		part := &genai.Part{
 			FunctionCall: &genai.FunctionCall{
 				Name: name,
 				Args: args,
 			},
+			ThoughtSignature: thoughtSig,
 		}
 		parts = append(parts, part)
 	}
@@ -381,17 +391,20 @@ func (p *GeminiProvider) parseResponse(resp *genai.GenerateContentResponse) (*LL
 	var content string
 	var toolCalls []ToolCall
 
-	for _, part := range candidate.Content.Parts {
+	for i, part := range candidate.Content.Parts {
 		if part.Text != "" {
 			content += part.Text
 		}
 		if part.FunctionCall != nil {
+			if len(part.ThoughtSignature) == 0 {
+				log.Printf("[GEMINI] WARNING: Function call %d (%s) has no thought_signature", i, part.FunctionCall.Name)
+			}
 			tc := ToolCall{
 				ID:        fmt.Sprintf("call_%s", uuid.New().String()[:8]),
 				Name:      part.FunctionCall.Name,
 				Arguments: part.FunctionCall.Args,
 				ExtraContent: map[string]interface{}{
-					"thought_signature": "",
+					"thought_signature": string(part.ThoughtSignature),
 				},
 			}
 			toolCalls = append(toolCalls, tc)

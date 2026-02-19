@@ -499,6 +499,7 @@ func (al *AgentLoop) runLLMIteration(ctx context.Context, agent *AgentInstance, 
 		var err error
 
 		callLLM := func() (*providers.LLMResponse, error) {
+			println("AGENT: Calling LLM with messages count:", len(messages))
 			if len(agent.Candidates) > 1 && al.fallback != nil {
 				fbResult, fbErr := al.fallback.Execute(ctx, agent.Candidates,
 					func(ctx context.Context, provider, model string) (*providers.LLMResponse, error) {
@@ -613,6 +614,7 @@ func (al *AgentLoop) runLLMIteration(ctx context.Context, agent *AgentInstance, 
 					Name:      tc.Name,
 					Arguments: string(argumentsJSON),
 				},
+				ExtraContent: tc.ExtraContent,
 			})
 		}
 		messages = append(messages, assistantMsg)
