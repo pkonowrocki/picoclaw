@@ -12,6 +12,7 @@ import (
 	"github.com/sipeed/picoclaw/pkg/providers"
 	"github.com/sipeed/picoclaw/pkg/skills"
 	"github.com/sipeed/picoclaw/pkg/tools"
+	"github.com/sipeed/picoclaw/pkg/utils"
 )
 
 type ContextBuilder struct {
@@ -207,10 +208,18 @@ func (cb *ContextBuilder) BuildMessages(history []providers.Message, summary str
 		parts := []providers.ContentPart{
 			{Type: "text", Text: currentMessage},
 		}
-		for _, url := range media {
+		for _, mediaPath := range media {
+			dataURI, err := utils.MediaToDataURI(mediaPath)
+			if err != nil {
+				logger.WarnCF("context", "Failed to convert media to data URI", map[string]interface{}{
+					"path":  mediaPath,
+					"error": err.Error(),
+				})
+				continue
+			}
 			parts = append(parts, providers.ContentPart{
 				Type:     "image_url",
-				ImageURL: &providers.ImageURL{URL: url},
+				ImageURL: &providers.ImageURL{URL: dataURI},
 			})
 		}
 		userMsg.ContentParts = parts

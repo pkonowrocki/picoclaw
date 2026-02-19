@@ -363,7 +363,7 @@ func CreateProvider(cfg *config.Config) (LLMProvider, error) {
 				if cfg.Providers.OpenAI.AuthMethod == "oauth" || cfg.Providers.OpenAI.AuthMethod == "token" {
 					return createCodexAuthProvider(cfg.Providers.OpenAI.WebSearch)
 				}
-				providerCfg = &cfg.Providers.OpenAI
+				providerCfg = &cfg.Providers.OpenAI.ProviderConfig
 				apiKey = cfg.Providers.OpenAI.APIKey
 				apiBase = cfg.Providers.OpenAI.APIBase
 				if apiBase == "" {
@@ -403,12 +403,12 @@ func CreateProvider(cfg *config.Config) (LLMProvider, error) {
 			}
 		case "gemini", "google":
 			if cfg.Providers.Gemini.APIKey != "" || len(cfg.Providers.Gemini.APIKeys) > 0 {
-				providerCfg = &cfg.Providers.Gemini
-				apiKey = cfg.Providers.Gemini.APIKey
-				apiBase = cfg.Providers.Gemini.APIBase
-				if apiBase == "" {
-					apiBase = "https://generativelanguage.googleapis.com/v1beta/openai"
+				geminiBase := cfg.Providers.Gemini.APIBase
+				geminiProxy := cfg.Providers.Gemini.Proxy
+				if len(cfg.Providers.Gemini.APIKeys) > 0 {
+					return NewGeminiProviderWithKeys(cfg.Providers.Gemini.APIKeys, geminiBase, geminiProxy), nil
 				}
+				return NewGeminiProvider(cfg.Providers.Gemini.APIKey, geminiBase, geminiProxy), nil
 			}
 		case "vllm":
 			if cfg.Providers.VLLM.APIBase != "" {
@@ -498,7 +498,7 @@ func CreateProvider(cfg *config.Config) (LLMProvider, error) {
 			if cfg.Providers.OpenAI.AuthMethod == "oauth" || cfg.Providers.OpenAI.AuthMethod == "token" {
 				return createCodexAuthProvider(cfg.Providers.OpenAI.WebSearch)
 			}
-			providerCfg = &cfg.Providers.OpenAI
+			providerCfg = &cfg.Providers.OpenAI.ProviderConfig
 			apiKey = cfg.Providers.OpenAI.APIKey
 			apiBase = cfg.Providers.OpenAI.APIBase
 			proxy = cfg.Providers.OpenAI.Proxy
@@ -506,14 +506,13 @@ func CreateProvider(cfg *config.Config) (LLMProvider, error) {
 				apiBase = "https://api.openai.com/v1"
 			}
 
-		case (strings.Contains(lowerModel, "gemini") || strings.HasPrefix(model, "google/")) && cfg.Providers.Gemini.APIKey != "":
-			providerCfg = &cfg.Providers.Gemini
-			apiKey = cfg.Providers.Gemini.APIKey
-			apiBase = cfg.Providers.Gemini.APIBase
-			proxy = cfg.Providers.Gemini.Proxy
-			if apiBase == "" {
-				apiBase = "https://generativelanguage.googleapis.com/v1beta/openai"
+		case (strings.Contains(lowerModel, "gemini") || strings.HasPrefix(model, "google/")) && (cfg.Providers.Gemini.APIKey != "" || len(cfg.Providers.Gemini.APIKeys) > 0):
+			geminiBase := cfg.Providers.Gemini.APIBase
+			geminiProxy := cfg.Providers.Gemini.Proxy
+			if len(cfg.Providers.Gemini.APIKeys) > 0 {
+				return NewGeminiProviderWithKeys(cfg.Providers.Gemini.APIKeys, geminiBase, geminiProxy), nil
 			}
+			return NewGeminiProvider(cfg.Providers.Gemini.APIKey, geminiBase, geminiProxy), nil
 
 		case (strings.Contains(lowerModel, "glm") || strings.Contains(lowerModel, "zhipu") || strings.Contains(lowerModel, "zai")) && cfg.Providers.Zhipu.APIKey != "":
 			providerCfg = &cfg.Providers.Zhipu

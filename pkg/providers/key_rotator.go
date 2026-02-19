@@ -31,3 +31,12 @@ func (kr *KeyRotator) Next() string {
 	kr.index++
 	return key
 }
+
+// GetAll returns a copy of all API keys.
+func (kr *KeyRotator) GetAll() []string {
+	kr.mu.Lock()
+	defer kr.mu.Unlock()
+	result := make([]string, len(kr.keys))
+	copy(result, kr.keys)
+	return result
+}

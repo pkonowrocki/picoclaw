@@ -1,6 +1,8 @@
 package utils
 
 import (
+	"encoding/base64"
+	"fmt"
 	"io"
 	"net/http"
 	"os"
@@ -11,6 +13,8 @@ import (
 	"github.com/google/uuid"
 	"github.com/sipeed/picoclaw/pkg/logger"
 )
+
+const maxMediaFileSize = 20 * 1024 * 1024 // 20MB
 
 // IsAudioFile checks if a file is an audio file based on its filename extension and content type.
 func IsAudioFile(filename, contentType string) bool {
@@ -139,4 +143,73 @@ func DownloadFileSimple(url, filename string) string {
 	return DownloadFile(url, filename, DownloadOptions{
 		LoggerPrefix: "media",
 	})
+}
+
+// mimeFromExtension returns a MIME type for the given file extension.
+// Falls back to "image/jpeg" for unknown extensions.
+func mimeFromExtension(ext string) string {
+	switch strings.ToLower(ext) {
+	case ".jpg", ".jpeg":
+		return "image/jpeg"
+	case ".png":
+		return "image/png"
+	case ".gif":
+		return "image/gif"
+	case ".webp":
+		return "image/webp"
+	case ".bmp":
+		return "image/bmp"
+	case ".svg":
+		return "image/svg+xml"
+	case ".tiff", ".tif":
+		return "image/tiff"
+	default:
+		return "image/jpeg"
+	}
+}
+
+// MediaToDataURI converts a media path (remote URL or local file path) to a
+// base64-encoded data URI (data:{mime};base64,{encoded}). This format is
+// universally supported by all major LLM providers (OpenAI, Anthropic, Gemini).
+func MediaToDataURI(path string) (string, error) {
+	var localPath string
+	var needsCleanup bool
+
+	if strings.HasPrefix(path, "http://") || strings.HasPrefix(path, "https://") {
+		// Remote URL: download to temp file
+		localPath = DownloadFile(path, filepath.Base(path), DownloadOptions{
+			LoggerPrefix: "media",
+		})
+		if localPath == "" {
+			return "", fmt.Errorf("failed to download media from %s", path)
+		}
+		needsCleanup = true
+	} else {
+		// Local file path
+		localPath = path
+	}
+
+	if needsCleanup {
+		defer os.Remove(localPath)
+	}
+
+	// Check file size before reading
+	info, err := os.Stat(localPath)
+	if err != nil {
+		return "", fmt.Errorf("cannot stat media file %s: %w", localPath, err)
+	}
+	if info.Size() > maxMediaFileSize {
+		return "", fmt.Errorf("media file too large (%d bytes, max %d): %s", info.Size(), maxMediaFileSize, localPath)
+	}
+
+	data, err := os.ReadFile(localPath)
+	if err != nil {
+		return "", fmt.Errorf("cannot read media file %s: %w", localPath, err)
+	}
+
+	ext := filepath.Ext(localPath)
+	mime := mimeFromExtension(ext)
+	encoded := base64.StdEncoding.EncodeToString(data)
+
+	return fmt.Sprintf("data:%s;base64,%s", mime, encoded), nil
 }
