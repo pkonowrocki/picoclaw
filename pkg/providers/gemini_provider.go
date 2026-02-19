@@ -1,13 +1,10 @@
 package providers
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
-	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -16,16 +13,16 @@ import (
 	"github.com/sipeed/picoclaw/pkg/tracing"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
+	"google.golang.org/genai"
 )
 
 type GeminiProvider struct {
 	apiKey         string
 	apiBase        string
-	httpClient     *http.Client
 	keyRotator     *KeyRotator
 	fallbackModels []string
+	client         *genai.Client
 
-	// Cache for last successful model+key
 	lastModel string
 	lastKey   string
 	mu        sync.RWMutex
@@ -35,47 +32,32 @@ var geminiFallbackModels = []string{
 	"gemini-2.5-pro",
 	"gemini-2.5-flash",
 	"gemini-2.5-flash-lite-preview-06-17",
-	// "gemini-2.0-flash",
-	// "gemini-2.0-flash-lite",
 }
 
 func NewGeminiProvider(apiKey, apiBase, proxy string) *GeminiProvider {
-	client := &http.Client{
-		Timeout: 120 * time.Second,
-	}
-
-	if proxy != "" {
-		proxyURL, err := url.Parse(proxy)
-		if err == nil {
-			client.Transport = &http.Transport{
-				Proxy: http.ProxyURL(proxyURL),
-			}
-		}
-	}
-
-	// Normalize API base: strip /openai suffix if present (migration from old config)
 	apiBase = strings.TrimRight(apiBase, "/")
 	apiBase = strings.TrimSuffix(apiBase, "/openai")
 
 	if apiBase == "" {
-		apiBase = "https://generativelanguage.googleapis.com/v1beta"
+		apiBase = "https://generativelanguage.googleapis.com"
 	}
 
 	return &GeminiProvider{
-		apiKey:     apiKey,
-		apiBase:    apiBase,
-		httpClient: client,
+		apiKey:  apiKey,
+		apiBase: apiBase,
 	}
 }
 
 func NewGeminiProviderWithKeys(keys []string, apiBase, proxy string) *GeminiProvider {
 	p := NewGeminiProvider(keys[0], apiBase, proxy)
-	p.keyRotator = NewKeyRotator(keys)
+	if p != nil {
+		p.keyRotator = NewKeyRotator(keys)
+	}
 	return p
 }
 
 func (p *GeminiProvider) GetDefaultModel() string {
-	return "gemini-3-flash-preview"
+	return "gemini-2.5-flash"
 }
 
 func (p *GeminiProvider) Chat(ctx context.Context, messages []Message, tools []ToolDefinition, model string, options map[string]interface{}) (*LLMResponse, error) {
@@ -86,7 +68,6 @@ func (p *GeminiProvider) Chat(ctx context.Context, messages []Message, tools []T
 		))
 	defer span.End()
 
-	// Strip provider prefix from model name (e.g. google/gemini-2.0-flash → gemini-2.0-flash)
 	if idx := strings.Index(model, "/"); idx != -1 {
 		prefix := model[:idx]
 		if prefix == "google" || prefix == "gemini" {
@@ -94,7 +75,6 @@ func (p *GeminiProvider) Chat(ctx context.Context, messages []Message, tools []T
 		}
 	}
 
-	// Build model list: primary first, then fallbacks
 	models := []string{model}
 	for _, fb := range p.fallbackModels {
 		if fb != model {
@@ -109,19 +89,16 @@ func (p *GeminiProvider) Chat(ctx context.Context, messages []Message, tools []T
 		}
 	}
 
-	// Build key list
 	keys := []string{p.apiKey}
 	if p.keyRotator != nil {
 		keys = p.keyRotator.GetAll()
 	}
 
-	// Check cache for last successful combo and try it first
 	p.mu.RLock()
 	cachedModel, cachedKey := p.lastModel, p.lastKey
 	p.mu.RUnlock()
 
 	if cachedModel != "" && cachedKey != "" {
-		// Verify cached values are still valid
 		modelValid := false
 		for _, m := range models {
 			if m == cachedModel {
@@ -148,14 +125,12 @@ func (p *GeminiProvider) Chat(ctx context.Context, messages []Message, tools []T
 	var lastErr error
 	for _, currentModel := range models {
 		for _, apiKey := range keys {
-			// Skip cached combo (already tried)
 			if currentModel == cachedModel && apiKey == cachedKey {
 				continue
 			}
 
 			response, err := p.tryRequest(ctx, messages, tools, currentModel, apiKey, options)
 			if err == nil {
-				// Cache successful combo
 				p.mu.Lock()
 				p.lastModel = currentModel
 				p.lastKey = apiKey
@@ -165,14 +140,11 @@ func (p *GeminiProvider) Chat(ctx context.Context, messages []Message, tools []T
 
 			lastErr = err
 
-			// Quota exhaustion - try next key
 			if strings.Contains(err.Error(), "RESOURCE_EXHAUSTED") ||
 				strings.Contains(err.Error(), "quota") ||
 				strings.Contains(err.Error(), "Quota") {
 				continue
 			}
-
-			// Other errors - try next model
 			break
 		}
 	}
@@ -181,177 +153,135 @@ func (p *GeminiProvider) Chat(ctx context.Context, messages []Message, tools []T
 }
 
 func (p *GeminiProvider) tryRequest(ctx context.Context, messages []Message, tools []ToolDefinition, model, apiKey string, options map[string]interface{}) (*LLMResponse, error) {
-	requestBody := p.buildRequest(messages, tools, options)
-
-	jsonData, err := json.Marshal(requestBody)
+	client, err := genai.NewClient(ctx, &genai.ClientConfig{
+		APIKey:  apiKey,
+		Backend: genai.BackendGeminiAPI,
+		HTTPClient: &http.Client{
+			Timeout: 120 * time.Second,
+		},
+	})
 	if err != nil {
-		return nil, fmt.Errorf("failed to marshal Gemini request: %w", err)
+		return nil, fmt.Errorf("failed to create Gemini client: %w", err)
 	}
 
-	endpoint := fmt.Sprintf("%s/models/%s:generateContent", p.apiBase, model)
-	reqURL := fmt.Sprintf("%s?key=%s", endpoint, apiKey)
+	contents := p.buildContents(messages)
 
-	req, err := http.NewRequestWithContext(ctx, "POST", reqURL, bytes.NewReader(jsonData))
-	if err != nil {
-		return nil, fmt.Errorf("failed to create request: %w", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := p.httpClient.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("failed to send request: %w", err)
-	}
-
-	body, err := io.ReadAll(resp.Body)
-	resp.Body.Close()
-	if err != nil {
-		return nil, fmt.Errorf("failed to read response: %w", err)
-	}
-
-	if resp.StatusCode == http.StatusOK {
-		return p.parseResponse(body)
-	}
-
-	return nil, fmt.Errorf("Gemini API error (HTTP %d): %s", resp.StatusCode, string(body))
-}
-
-// buildRequest converts the common message format to a native Gemini API request.
-func (p *GeminiProvider) buildRequest(messages []Message, tools []ToolDefinition, options map[string]interface{}) map[string]interface{} {
-	request := make(map[string]interface{})
-
-	var systemParts []map[string]interface{}
-	var contents []map[string]interface{}
-
-	for i := 0; i < len(messages); i++ {
-		msg := messages[i]
-
-		switch msg.Role {
-		case "system":
-			systemParts = append(systemParts, map[string]interface{}{
-				"text": msg.Content,
-			})
-
-		case "user":
-			parts := p.userParts(msg)
-			contents = append(contents, map[string]interface{}{
-				"role":  "user",
-				"parts": parts,
-			})
-
-		case "assistant":
-			parts := p.assistantParts(msg)
-			contents = append(contents, map[string]interface{}{
-				"role":  "model",
-				"parts": parts,
-			})
-
-		case "tool":
-			// Group consecutive tool messages into a single user turn with functionResponse parts
-			var funcResponses []map[string]interface{}
-			for ; i < len(messages) && messages[i].Role == "tool"; i++ {
-				toolMsg := messages[i]
-				funcName := p.resolveToolName(messages[:i], toolMsg.ToolCallID)
-
-				var responseData interface{}
-				if err := json.Unmarshal([]byte(toolMsg.Content), &responseData); err != nil {
-					responseData = map[string]interface{}{"result": toolMsg.Content}
-				}
-				switch responseData.(type) {
-				case []interface{}:
-					responseData = map[string]interface{}{"result": responseData}
-				}
-
-				funcResponses = append(funcResponses, map[string]interface{}{
-					"functionResponse": map[string]interface{}{
-						"name":     funcName,
-						"response": responseData,
-					},
-				})
-			}
-			i-- // compensate for outer loop increment
-
-			contents = append(contents, map[string]interface{}{
-				"role":  "user",
-				"parts": funcResponses,
-			})
-		}
-	}
-
-	if len(systemParts) > 0 {
-		request["system_instruction"] = map[string]interface{}{
-			"parts": systemParts,
-		}
-	}
-	if len(contents) > 0 {
-		request["contents"] = contents
-	}
-
-	// Tool definitions
+	genConfig := &genai.GenerateContentConfig{}
 	if len(tools) > 0 {
-		funcDecls := make([]map[string]interface{}, 0, len(tools))
-		for _, t := range tools {
-			decl := map[string]interface{}{
-				"name":        t.Function.Name,
-				"description": t.Function.Description,
+		genTools := make([]*genai.Tool, len(tools))
+		for i, t := range tools {
+			genTools[i] = &genai.Tool{
+				FunctionDeclarations: []*genai.FunctionDeclaration{
+					{
+						Name:        t.Function.Name,
+						Description: t.Function.Description,
+						Parameters:  convertParameters(t.Function.Parameters),
+					},
+				},
 			}
-			if t.Function.Parameters != nil {
-				decl["parameters"] = t.Function.Parameters
-			}
-			funcDecls = append(funcDecls, decl)
 		}
-		request["tools"] = []map[string]interface{}{
-			{"function_declarations": funcDecls},
-		}
-		request["tool_config"] = map[string]interface{}{
-			"function_calling_config": map[string]interface{}{
-				"mode": "AUTO",
+		genConfig.Tools = genTools
+		genConfig.ToolConfig = &genai.ToolConfig{
+			FunctionCallingConfig: &genai.FunctionCallingConfig{
+				Mode: genai.FunctionCallingConfigModeAuto,
 			},
 		}
 	}
 
-	// Generation config
-	genConfig := map[string]interface{}{}
 	if maxTokens, ok := options["max_tokens"].(int); ok {
-		genConfig["maxOutputTokens"] = maxTokens
+		genConfig.MaxOutputTokens = int32(maxTokens)
 	}
 	if temperature, ok := options["temperature"].(float64); ok {
-		genConfig["temperature"] = temperature
-	}
-	if len(genConfig) > 0 {
-		request["generationConfig"] = genConfig
+		genConfig.Temperature = genai.Ptr(float32(temperature))
 	}
 
-	return request
+	resp, err := client.Models.GenerateContent(ctx, model, contents, genConfig)
+	if err != nil {
+		return nil, fmt.Errorf("Gemini API error: %w", err)
+	}
+
+	return p.parseResponse(resp)
 }
 
-func (p *GeminiProvider) userParts(msg Message) []map[string]interface{} {
-	if len(msg.ContentParts) > 0 {
-		parts := make([]map[string]interface{}, 0, len(msg.ContentParts))
-		for _, cp := range msg.ContentParts {
-			switch cp.Type {
-			case "text":
-				parts = append(parts, map[string]interface{}{"text": cp.Text})
-			case "image_url":
-				if cp.ImageURL != nil {
-					if imgPart := geminiImagePart(cp.ImageURL.URL); imgPart != nil {
-						parts = append(parts, imgPart)
-					}
+func convertParameters(params map[string]interface{}) *genai.Schema {
+	if params == nil {
+		return nil
+	}
+	return &genai.Schema{
+		Type: genai.TypeObject,
+	}
+}
+
+func (p *GeminiProvider) buildContents(messages []Message) []*genai.Content {
+	var contents []*genai.Content
+
+	for _, msg := range messages {
+		switch msg.Role {
+		case "system":
+			contents = append(contents, &genai.Content{
+				Role: "system",
+				Parts: []*genai.Part{
+					{Text: msg.Content},
+				},
+			})
+
+		case "user":
+			parts := p.userParts(msg)
+			contents = append(contents, &genai.Content{
+				Role:  "user",
+				Parts: parts,
+			})
+
+		case "assistant":
+			parts := p.assistantParts(msg)
+			contents = append(contents, &genai.Content{
+				Role:  "model",
+				Parts: parts,
+			})
+
+		case "tool":
+			funcResponses := p.toolParts(msg)
+			contents = append(contents, &genai.Content{
+				Role:  "user",
+				Parts: funcResponses,
+			})
+		}
+	}
+
+	return contents
+}
+
+func (p *GeminiProvider) userParts(msg Message) []*genai.Part {
+	var parts []*genai.Part
+
+	if msg.Content != "" {
+		parts = append(parts, &genai.Part{Text: msg.Content})
+	}
+
+	for _, cp := range msg.ContentParts {
+		switch cp.Type {
+		case "text":
+			parts = append(parts, &genai.Part{Text: cp.Text})
+		case "image_url":
+			if cp.ImageURL != nil {
+				if part := geminiPartFromImageURL(cp.ImageURL.URL); part != nil {
+					parts = append(parts, part)
 				}
 			}
 		}
-		if len(parts) == 0 {
-			parts = append(parts, map[string]interface{}{"text": ""})
-		}
-		return parts
 	}
-	return []map[string]interface{}{{"text": msg.Content}}
+
+	if len(parts) == 0 {
+		parts = append(parts, &genai.Part{Text: ""})
+	}
+	return parts
 }
 
-func (p *GeminiProvider) assistantParts(msg Message) []map[string]interface{} {
-	var parts []map[string]interface{}
+func (p *GeminiProvider) assistantParts(msg Message) []*genai.Part {
+	var parts []*genai.Part
 
 	if msg.Content != "" {
-		parts = append(parts, map[string]interface{}{"text": msg.Content})
+		parts = append(parts, &genai.Part{Text: msg.Content})
 	}
 
 	for _, tc := range msg.ToolCalls {
@@ -359,39 +289,57 @@ func (p *GeminiProvider) assistantParts(msg Message) []map[string]interface{} {
 		if name == "" && tc.Function != nil {
 			name = tc.Function.Name
 		}
+
 		args := tc.Arguments
 		if args == nil && tc.Function != nil && tc.Function.Arguments != "" {
 			_ = json.Unmarshal([]byte(tc.Function.Arguments), &args)
 		}
-		if args == nil {
-			args = map[string]interface{}{}
-		}
-		fcPart := map[string]interface{}{
-			"name": name,
-			"args": args,
-		}
-		part := map[string]interface{}{
-			"functionCall": fcPart,
-		}
-		if sig, ok := tc.ExtraContent["thought_signature"].(string); ok && sig != "" {
-			part["thoughtSignature"] = sig
+
+		part := &genai.Part{
+			FunctionCall: &genai.FunctionCall{
+				Name: name,
+				Args: args,
+			},
 		}
 		parts = append(parts, part)
 	}
 
 	if len(parts) == 0 {
-		parts = append(parts, map[string]interface{}{"text": ""})
+		parts = append(parts, &genai.Part{Text: ""})
 	}
 	return parts
 }
 
-// geminiImagePart converts an image URL to a Gemini-native part.
-//   - data: URIs  → inlineData  (base64 images from MediaToDataURI)
-//   - https: URLs → fileData    (remote images Gemini can fetch)
-func geminiImagePart(imageURL string) map[string]interface{} {
+func (p *GeminiProvider) toolParts(msg Message) []*genai.Part {
+	funcName := msg.ToolCallID
+	if funcName == "" {
+		funcName = "unknown"
+	}
+
+	var responseData interface{}
+	if err := json.Unmarshal([]byte(msg.Content), &responseData); err != nil {
+		responseData = map[string]interface{}{"result": msg.Content}
+	}
+	switch responseData.(type) {
+	case []interface{}:
+		responseData = map[string]interface{}{"result": responseData}
+	}
+
+	return []*genai.Part{
+		{
+			FunctionResponse: &genai.FunctionResponse{
+				Name: funcName,
+				Response: map[string]interface{}{
+					"result": responseData,
+				},
+			},
+		},
+	}
+}
+
+func geminiPartFromImageURL(imageURL string) *genai.Part {
 	if strings.HasPrefix(imageURL, "data:") {
-		// Parse data:{mimeType};base64,{data}
-		rest := imageURL[5:] // strip "data:"
+		rest := imageURL[5:]
 		semiIdx := strings.Index(rest, ";")
 		if semiIdx == -1 {
 			return nil
@@ -405,19 +353,18 @@ func geminiImagePart(imageURL string) map[string]interface{} {
 		}
 		base64Data := imageURL[dataStart+len(marker):]
 
-		return map[string]interface{}{
-			"inlineData": map[string]interface{}{
-				"mimeType": mimeType,
-				"data":     base64Data,
+		return &genai.Part{
+			InlineData: &genai.Blob{
+				MIMEType: mimeType,
+				Data:     []byte(base64Data),
 			},
 		}
 	}
 
 	if strings.HasPrefix(imageURL, "https://") || strings.HasPrefix(imageURL, "http://") {
-		return map[string]interface{}{
-			"fileData": map[string]interface{}{
-				"fileUri":  imageURL,
-				"mimeType": "image/jpeg",
+		return &genai.Part{
+			FileData: &genai.FileData{
+				FileURI: imageURL,
 			},
 		}
 	}
@@ -425,46 +372,7 @@ func geminiImagePart(imageURL string) map[string]interface{} {
 	return nil
 }
 
-// resolveToolName finds the function name for a tool_call_id by searching
-// previous assistant messages (Gemini matches tool results by name, not ID).
-func (p *GeminiProvider) resolveToolName(preceding []Message, toolCallID string) string {
-	for i := len(preceding) - 1; i >= 0; i-- {
-		if preceding[i].Role == "assistant" {
-			for _, tc := range preceding[i].ToolCalls {
-				if tc.ID == toolCallID {
-					if tc.Name != "" {
-						return tc.Name
-					}
-					if tc.Function != nil {
-						return tc.Function.Name
-					}
-				}
-			}
-		}
-	}
-	return "unknown"
-}
-
-func (p *GeminiProvider) parseResponse(body []byte) (*LLMResponse, error) {
-	var resp struct {
-		Candidates []struct {
-			Content struct {
-				Parts []json.RawMessage `json:"parts"`
-				Role  string            `json:"role"`
-			} `json:"content"`
-			FinishReason string `json:"finishReason"`
-		} `json:"candidates"`
-		UsageMetadata struct {
-			PromptTokenCount     int `json:"promptTokenCount"`
-			CandidatesTokenCount int `json:"candidatesTokenCount"`
-			TotalTokenCount      int `json:"totalTokenCount"`
-		} `json:"usageMetadata"`
-	}
-
-	if err := json.Unmarshal(body, &resp); err != nil {
-		return nil, fmt.Errorf("failed to parse Gemini response: %w (body: %.200s)", err, string(body))
-	}
-
+func (p *GeminiProvider) parseResponse(resp *genai.GenerateContentResponse) (*LLMResponse, error) {
 	if len(resp.Candidates) == 0 {
 		return &LLMResponse{Content: "", FinishReason: "stop"}, nil
 	}
@@ -473,53 +381,39 @@ func (p *GeminiProvider) parseResponse(body []byte) (*LLMResponse, error) {
 	var content string
 	var toolCalls []ToolCall
 
-	for _, raw := range candidate.Content.Parts {
-		var part map[string]interface{}
-		if err := json.Unmarshal(raw, &part); err != nil {
-			continue
+	for _, part := range candidate.Content.Parts {
+		if part.Text != "" {
+			content += part.Text
 		}
-
-		if text, ok := part["text"].(string); ok {
-			content += text
-		}
-
-		if fc, ok := part["functionCall"].(map[string]interface{}); ok {
-			name, _ := fc["name"].(string)
-			args, _ := fc["args"].(map[string]interface{})
-			if args == nil {
-				args = map[string]interface{}{}
-			}
+		if part.FunctionCall != nil {
 			tc := ToolCall{
 				ID:        fmt.Sprintf("call_%s", uuid.New().String()[:8]),
-				Name:      name,
-				Arguments: args,
-			}
-			if sig, ok := part["thoughtSignature"].(string); ok && sig != "" {
-				tc.ExtraContent = map[string]interface{}{
-					"thought_signature": sig,
-				}
+				Name:      part.FunctionCall.Name,
+				Arguments: part.FunctionCall.Args,
+				ExtraContent: map[string]interface{}{
+					"thought_signature": "",
+				},
 			}
 			toolCalls = append(toolCalls, tc)
 		}
 	}
 
 	finishReason := "stop"
-	switch candidate.FinishReason {
-	case "MAX_TOKENS":
-		finishReason = "length"
-	}
 	if len(toolCalls) > 0 {
 		finishReason = "tool_calls"
+	}
+
+	usage := &UsageInfo{}
+	if resp.UsageMetadata != nil {
+		usage.PromptTokens = int(resp.UsageMetadata.PromptTokenCount)
+		usage.CompletionTokens = int(resp.UsageMetadata.CandidatesTokenCount)
+		usage.TotalTokens = int(resp.UsageMetadata.TotalTokenCount)
 	}
 
 	return &LLMResponse{
 		Content:      content,
 		ToolCalls:    toolCalls,
 		FinishReason: finishReason,
-		Usage: &UsageInfo{
-			PromptTokens:     resp.UsageMetadata.PromptTokenCount,
-			CompletionTokens: resp.UsageMetadata.CandidatesTokenCount,
-			TotalTokens:      resp.UsageMetadata.TotalTokenCount,
-		},
+		Usage:        usage,
 	}, nil
 }
