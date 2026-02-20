@@ -30,10 +30,12 @@ type GeminiProvider struct {
 }
 
 var geminiFallbackModels = []string{
-	"gemini-2.5-pro",
-	"gemini-flash-latest",
 	"gemini-3-pro-preview",
-	"gemini-2.5-flash-lite",
+	"gemini-3.1-pro-preview",
+	"gemini-2.5-pro",
+	// "gemini-flash-latest",
+	"gemini-3-flash-preview",
+	// "gemini-2.5-flash-lite",
 }
 
 func NewGeminiProvider(apiKey, apiBase, proxy string) *GeminiProvider {
@@ -169,6 +171,18 @@ func (p *GeminiProvider) tryRequest(ctx context.Context, messages []Message, too
 	contents := p.buildContents(messages)
 
 	genConfig := &genai.GenerateContentConfig{}
+
+	var systemInstruction *genai.Content
+	if len(contents) > 0 && contents[0].Role == "system" {
+		systemInstruction = contents[0]
+		contents = contents[1:]
+	}
+	if systemInstruction != nil && len(systemInstruction.Parts) > 0 {
+		genConfig.SystemInstruction = &genai.Content{
+			Role:  "system",
+			Parts: systemInstruction.Parts,
+		}
+	}
 	if len(tools) > 0 {
 		genTools := make([]*genai.Tool, len(tools))
 		for i, t := range tools {
